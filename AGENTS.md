@@ -29,7 +29,7 @@ Notes for AI coding assistants. Everything below was checked against the reposit
 - Safe wrappers follow the existing pattern: `unsafe` call into `sys::SteamAPI_*`, builder-style `#[must_use]` setters on handles such as `UpdateHandle`. Mirror the style of neighbouring functions when adding bindings.
 - Generated `*_bindings.rs` files and SDK headers/binaries come from the SDK upgrade/`rebuild-bindings` flow; do not hand-edit the generated bindings.
 - Keep `rust-version = "1.80.0"` compatible (CI builds on 1.80.0).
-- No contribution or commit-message guidelines file exists in this repo. The checkout is shallow (one commit), so commit habits could not be verified.
+- No contribution or commit-message guidelines file exists in this repo.
 
 ## Gotchas
 
