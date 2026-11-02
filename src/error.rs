@@ -17,6 +17,10 @@ pub enum SteamError {
     /// Returned if the steamworks API fails to perform an action
     #[error("a generic failure from the steamworks API")]
     Generic,
+    /// Returned when Steam reports a result code this binding does not name. The value is kept
+    /// so the caller can report it; the process keeps running.
+    #[error("unknown Steam result code {0}")]
+    UnknownResult(i32),
     /// Returned when steam fails performing a network request
     #[error("there isn't a network connection to steam or it failed to connect")]
     NoConnection,
@@ -516,8 +520,50 @@ impl From<sys::EResult> for SteamError {
             sys::EResult::k_EResultTooManyPending => SteamError::TooManyPending,
             sys::EResult::k_EResultNoSiteLicensesFound => SteamError::NoSiteLicensesFound,
             sys::EResult::k_EResultWGNetworkSendExceeded => SteamError::WGNetworkSendExceeded,
-            _ => unreachable!(),
+            // A valid EResult without a named mapping: keep its number instead of panicking
+            _ => SteamError::UnknownResult(r as u32 as i32),
         }
+    }
+}
+
+/// Convert a raw Steam result code into an error, without forming an `EResult` from it.
+///
+/// `EResult` is a Rust enum, so reading an unlisted number into it is undefined behaviour before
+/// any match runs. Callbacks use this integer path instead. Unlisted numbers become
+/// `UnknownResult` with the number kept.
+pub(crate) fn steam_error_from_raw(raw: u32) -> SteamError {
+    SteamError::try_from(i64::from(raw)).unwrap_or(SteamError::UnknownResult(raw as i32))
+}
+
+/// Environment variable that turns on per-callback result diagnostics (task 1.2)
+pub(crate) const RESULT_DIAGNOSTICS_ENV: &str = "DUCKY_STEAM_RESULT_DIAGNOSTICS";
+
+/// Whether result diagnostics are enabled for this process
+pub(crate) fn result_diagnostics_enabled() -> bool {
+    std::env::var_os(RESULT_DIAGNOSTICS_ENV).is_some()
+}
+
+/// One diagnostic line for a raw result seen by a callback: the number, and whether it maps to a
+/// named result (or `unmapped`). The callback type says which struct the number came from.
+pub(crate) fn describe_raw_result(callback: &str, raw: u32) -> String {
+    let named = if raw == sys::EResult::k_EResultOK as u32 {
+        "OK".to_string()
+    } else {
+        match SteamError::try_from(i64::from(raw)) {
+            Ok(error) => format!("{error:?}"),
+            Err(_) => "unmapped".to_string(),
+        }
+    };
+    format!("[steamworks diag] {callback} result={raw} named={named}")
+}
+
+/// `Ok(())` when a raw Steam result is `k_EResultOK`, otherwise the matching error.
+/// Reads only the integer; see [`steam_error_from_raw`].
+pub(crate) fn check_raw_result(raw: u32) -> Result<(), SteamError> {
+    if raw == sys::EResult::k_EResultOK as u32 {
+        Ok(())
+    } else {
+        Err(steam_error_from_raw(raw))
     }
 }
 
@@ -745,6 +791,9 @@ pub enum SteamAPIInitError {
 
     #[error("Steam client appears to be out of date")]
     VersionMismatch(String),
+
+    #[error("unknown Steam API init result code {0}: {1}")]
+    UnknownResult(i32, String),
 }
 
 impl SteamAPIInitError {
@@ -757,17 +806,114 @@ impl SteamAPIInitError {
             cstr.to_string_lossy().to_owned().into_owned()
         };
 
-        match result {
-            sys::ESteamAPIInitResult::k_ESteamAPIInitResult_FailedGeneric => {
+        Self::from_raw_result_and_message(result as i32, err_string)
+    }
+
+    /// Same as [`from_result_and_message`](Self::from_result_and_message), starting from the raw
+    /// integer so an unlisted value is never formed as an enum.
+    pub(crate) fn from_raw_result_and_message(raw: i32, err_string: String) -> Self {
+        match raw {
+            x if x == sys::ESteamAPIInitResult::k_ESteamAPIInitResult_FailedGeneric as i32 => {
                 SteamAPIInitError::FailedGeneric(err_string)
             }
-            sys::ESteamAPIInitResult::k_ESteamAPIInitResult_NoSteamClient => {
+            x if x == sys::ESteamAPIInitResult::k_ESteamAPIInitResult_NoSteamClient as i32 => {
                 SteamAPIInitError::NoSteamClient(err_string)
             }
-            sys::ESteamAPIInitResult::k_ESteamAPIInitResult_VersionMismatch => {
+            x if x == sys::ESteamAPIInitResult::k_ESteamAPIInitResult_VersionMismatch as i32 => {
                 SteamAPIInitError::VersionMismatch(err_string)
             }
-            _ => unreachable!(),
+            _ => SteamAPIInitError::UnknownResult(raw, err_string),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A number that no Steam EResult uses, so it is outside the table
+    const UNLISTED_RESULT: u32 = 999_999;
+
+    #[test]
+    fn known_result_keeps_its_named_error() {
+        assert_eq!(
+            steam_error_from_raw(sys::EResult::k_EResultFail as u32),
+            SteamError::Generic
+        );
+        assert_eq!(
+            SteamError::from(sys::EResult::k_EResultFail),
+            SteamError::Generic
+        );
+    }
+
+    #[test]
+    fn unlisted_result_becomes_unknown_result_with_its_number() {
+        let error = steam_error_from_raw(UNLISTED_RESULT);
+        assert_eq!(error, SteamError::UnknownResult(UNLISTED_RESULT as i32));
+        assert!(error.to_string().contains("999999"), "message was: {error}");
+    }
+
+    #[test]
+    fn diagnostic_line_names_known_results_and_marks_unmapped_ones() {
+        let known = describe_raw_result("DeleteItemResult_t", sys::EResult::k_EResultFail as u32);
+        assert_eq!(
+            known,
+            "[steamworks diag] DeleteItemResult_t result=2 named=Generic"
+        );
+        let unmapped = describe_raw_result("DeleteItemResult_t", UNLISTED_RESULT);
+        assert_eq!(
+            unmapped,
+            "[steamworks diag] DeleteItemResult_t result=999999 named=unmapped"
+        );
+        let ok = describe_raw_result("DeleteItemResult_t", sys::EResult::k_EResultOK as u32);
+        assert!(ok.ends_with("named=OK"), "line was: {ok}");
+    }
+
+    #[test]
+    fn check_raw_result_is_ok_only_for_ok() {
+        assert_eq!(check_raw_result(sys::EResult::k_EResultOK as u32), Ok(()));
+        assert_eq!(
+            check_raw_result(sys::EResult::k_EResultFail as u32),
+            Err(SteamError::Generic)
+        );
+        assert_eq!(
+            check_raw_result(UNLISTED_RESULT),
+            Err(SteamError::UnknownResult(UNLISTED_RESULT as i32))
+        );
+    }
+
+    #[test]
+    fn unlisted_init_result_is_an_error_not_a_panic() {
+        let error = SteamAPIInitError::from_raw_result_and_message(99, "boom".to_string());
+        assert_eq!(
+            error,
+            SteamAPIInitError::UnknownResult(99, "boom".to_string())
+        );
+        assert!(error.to_string().contains("99"), "message was: {error}");
+    }
+
+    #[test]
+    fn known_init_results_keep_their_meaning() {
+        assert_eq!(
+            SteamAPIInitError::from_raw_result_and_message(
+                sys::ESteamAPIInitResult::k_ESteamAPIInitResult_FailedGeneric as i32,
+                "x".to_string()
+            ),
+            SteamAPIInitError::FailedGeneric("x".to_string())
+        );
+        assert_eq!(
+            SteamAPIInitError::from_raw_result_and_message(
+                sys::ESteamAPIInitResult::k_ESteamAPIInitResult_NoSteamClient as i32,
+                "x".to_string()
+            ),
+            SteamAPIInitError::NoSteamClient("x".to_string())
+        );
+        assert_eq!(
+            SteamAPIInitError::from_raw_result_and_message(
+                sys::ESteamAPIInitResult::k_ESteamAPIInitResult_VersionMismatch as i32,
+                "x".to_string()
+            ),
+            SteamAPIInitError::VersionMismatch("x".to_string())
+        );
     }
 }
