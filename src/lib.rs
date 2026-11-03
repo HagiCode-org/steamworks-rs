@@ -105,8 +105,9 @@ struct Inner {
 
 struct Callbacks {
     callbacks: Mutex<HashMap<i32, Box<dyn FnMut(*mut c_void) + Send + 'static>>>,
-    call_results:
-        Mutex<HashMap<sys::SteamAPICall_t, Box<dyn FnOnce(*mut c_void, bool) + Send + 'static>>>,
+    call_results: Mutex<
+        HashMap<sys::SteamAPICall_t, Box<dyn FnOnce(*mut c_void, usize, bool) + Send + 'static>>,
+    >,
 }
 
 impl Inner {
@@ -177,7 +178,11 @@ impl Inner {
                         // The &{val} pattern here is to avoid taking a reference to a packed field
                         // Since the value here is Copy, we can just copy it and borrow the copy
                         if let Some(cb) = call_results.remove(&{ apicall.m_hAsyncCall }) {
-                            cb(apicall_result.as_mut_ptr().cast(), failed);
+                            cb(
+                                apicall_result.as_mut_ptr().cast(),
+                                apicall_result.len(),
+                                failed,
+                            );
                         }
                     }
                 } else {

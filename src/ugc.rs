@@ -523,14 +523,20 @@ impl UGC {
     {
         unsafe {
             let api_call = sys::SteamAPI_ISteamUGC_CreateItem(self.ugc, app_id.0, file_type.into());
-            register_call_result::<sys::CreateItemResult_t, _>(
+            register_call_result_raw::<sys::CreateItemResult_t, _>(
                 &self.inner,
                 api_call,
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
                     } else {
-                        crate::to_steam_result(v.m_eResult).map(|_| {
+                        // SAFETY: io_error is false, so v points at a full CreateItemResult_t
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw).map(|_| {
+                            // SAFETY: m_eResult is k_EResultOK, so the struct holds valid values
+                            let v = v.read_unaligned();
                             (
                                 PublishedFileId(v.m_nPublishedFileId),
                                 v.m_bUserNeedsToAcceptWorkshopLegalAgreement,
@@ -563,14 +569,18 @@ impl UGC {
     {
         unsafe {
             let api_call = sys::SteamAPI_ISteamUGC_SubscribeItem(self.ugc, published_file_id.0);
-            register_call_result::<sys::RemoteStorageSubscribePublishedFileResult_t, _>(
+            register_call_result_raw::<sys::RemoteStorageSubscribePublishedFileResult_t, _>(
                 &self.inner,
                 api_call,
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
                     } else {
-                        crate::to_steam_result(v.m_eResult)
+                        // SAFETY: io_error is false, so v points at a full RemoteStorageSubscribePublishedFileResult_t
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw)
                     })
                 },
             );
@@ -583,14 +593,18 @@ impl UGC {
     {
         unsafe {
             let api_call = sys::SteamAPI_ISteamUGC_UnsubscribeItem(self.ugc, published_file_id.0);
-            register_call_result::<sys::RemoteStorageUnsubscribePublishedFileResult_t, _>(
+            register_call_result_raw::<sys::RemoteStorageUnsubscribePublishedFileResult_t, _>(
                 &self.inner,
                 api_call,
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
                     } else {
-                        crate::to_steam_result(v.m_eResult)
+                        // SAFETY: io_error is false, so v points at a full RemoteStorageUnsubscribePublishedFileResult_t
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw)
                     })
                 },
             );
@@ -792,18 +806,32 @@ impl UGC {
     {
         unsafe {
             let api_call = sys::SteamAPI_ISteamUGC_DeleteItem(self.ugc, published_file_id.0);
-            register_call_result::<sys::DownloadItemResult_t, _>(
+            // DeleteItem's result is DeleteItemResult_t (12 bytes, packed 4, callback 3417, m_eResult
+            // at offset 0). It was registered as DownloadItemResult_t (16 bytes, m_eResult at offset
+            // 12), which read past the received bytes and produced an unlisted m_eResult (task 1.1).
+            register_call_result_raw::<sys::DeleteItemResult_t, _>(
                 &self.inner,
                 api_call,
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
-                    } else if v.m_eResult != sys::EResult::k_EResultNone
-                        && v.m_eResult != sys::EResult::k_EResultOK
-                    {
-                        Err(v.m_eResult.into())
                     } else {
-                        Ok(())
+                        // SAFETY: io_error is false, so v points at a full DeleteItemResult_t.
+                        // The EResult is read as an integer, so an unlisted value never forms an enum.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        if crate::error::result_diagnostics_enabled() {
+                            eprintln!(
+                                "{}",
+                                crate::error::describe_raw_result("DeleteItemResult_t", raw)
+                            );
+                        }
+                        if raw == sys::EResult::k_EResultNone as u32 {
+                            Ok(())
+                        } else {
+                            crate::error::check_raw_result(raw)
+                        }
                     })
                 },
             );
@@ -1029,19 +1057,25 @@ impl UpdateHandle {
             let change_note = change_note.and_then(|v| CString::new(v).ok());
             let note = change_note.as_ref().map_or(ptr::null(), |v| v.as_ptr());
             let api_call = sys::SteamAPI_ISteamUGC_SubmitItemUpdate(self.ugc, self.handle, note);
-            register_call_result::<sys::SubmitItemUpdateResult_t, _>(
+            register_call_result_raw::<sys::SubmitItemUpdateResult_t, _>(
                 &self.inner,
                 api_call,
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
-                    } else if v.m_eResult != sys::EResult::k_EResultOK {
-                        Err(v.m_eResult.into())
                     } else {
-                        Ok((
-                            PublishedFileId(v.m_nPublishedFileId),
-                            v.m_bUserNeedsToAcceptWorkshopLegalAgreement,
-                        ))
+                        // SAFETY: io_error is false, so v points at a full SubmitItemUpdateResult_t
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw).map(|_| {
+                            // SAFETY: m_eResult is k_EResultOK, so the struct holds valid values
+                            let v = v.read_unaligned();
+                            (
+                                PublishedFileId(v.m_nPublishedFileId),
+                                v.m_bUserNeedsToAcceptWorkshopLegalAgreement,
+                            )
+                        })
                     })
                 },
             );
@@ -1450,7 +1484,7 @@ impl QueryHandle {
 
         unsafe {
             let api_call = sys::SteamAPI_ISteamUGC_SendQueryUGCRequest(ugc, handle);
-            register_call_result::<sys::SteamUGCQueryCompleted_t, _>(
+            register_call_result_raw::<sys::SteamUGCQueryCompleted_t, _>(
                 &inner,
                 api_call,
                 move |v, io_error| {
@@ -1459,11 +1493,18 @@ impl QueryHandle {
                         sys::SteamAPI_ISteamUGC_ReleaseQueryUGCRequest(ugc, handle);
                         cb(Err(SteamError::IOFailure));
                         return;
-                    } else if v.m_eResult != sys::EResult::k_EResultOK {
+                    }
+                    // SAFETY: io_error is false, so v points at a full SteamUGCQueryCompleted_t
+                    let raw = std::ptr::addr_of!((*v).m_eResult)
+                        .cast::<u32>()
+                        .read_unaligned();
+                    if let Err(error) = crate::error::check_raw_result(raw) {
                         sys::SteamAPI_ISteamUGC_ReleaseQueryUGCRequest(ugc, handle);
-                        cb(Err(v.m_eResult.into()));
+                        cb(Err(error));
                         return;
                     }
+                    // SAFETY: m_eResult is k_EResultOK, so the struct holds valid values
+                    let v = v.read_unaligned();
 
                     let result = QueryResults {
                         ugc,

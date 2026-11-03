@@ -190,6 +190,11 @@ where
     }
 }
 
+/// Register a call result whose struct is decoded as `C` once it has arrived.
+///
+/// A result shorter than `C` is reported as a failed call (`io_error == true`), with a zeroed
+/// value that is never read as a real result. Use [`register_call_result_raw`] when the struct
+/// contains an `EResult` that must be checked before the rest is decoded.
 pub(crate) unsafe fn register_call_result<C, F>(
     inner: &Arc<Inner>,
     api_call: sys::SteamAPICall_t,
@@ -199,9 +204,37 @@ pub(crate) unsafe fn register_call_result<C, F>(
 {
     inner.callbacks.call_results.lock().unwrap().insert(
         api_call,
-        Box::new(move |param, failed| {
-            let value = param.cast::<C>().read_unaligned();
-            f(&value, failed)
+        Box::new(move |param, len, failed| {
+            let short = len < std::mem::size_of::<C>();
+            // Zeroed C is valid for every sys result struct (EResult 0 is k_EResultNone), and it is
+            // only handed to `f` together with `io_error == true`, so it is never read as a result
+            let value = if short {
+                std::mem::zeroed::<C>()
+            } else {
+                param.cast::<C>().read_unaligned()
+            };
+            f(&value, failed || short)
+        }),
+    );
+}
+
+/// Register a call result that is passed to `f` as a pointer, without decoding it.
+///
+/// The pointer is `None` only when `io_error` is true. The caller must read the `EResult` field
+/// as an integer (see `error::check_raw_result`) and decode the rest of the struct only after
+/// the result is valid. The pointer is valid only while `f` runs.
+pub(crate) unsafe fn register_call_result_raw<C, F>(
+    inner: &Arc<Inner>,
+    api_call: sys::SteamAPICall_t,
+    f: F,
+) where
+    F: FnOnce(*const C, bool) + 'static + Send,
+{
+    inner.callbacks.call_results.lock().unwrap().insert(
+        api_call,
+        Box::new(move |param, len, failed| {
+            let short = len < std::mem::size_of::<C>();
+            f(param.cast::<C>(), failed || short)
         }),
     );
 }
