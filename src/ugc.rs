@@ -908,6 +908,24 @@ impl UpdateHandle {
         self
     }
 
+    /// Adds an additional preview (a screenshot) to the item with `AddItemPreviewFile`. The main preview is
+    /// [`UpdateHandle::preview_path`]; this one appends to the item's "additional previews". The file must be an
+    /// existing file for an image type.
+    #[must_use]
+    pub fn add_preview_file(self, path: &Path, preview_type: sys::EItemPreviewType) -> Self {
+        unsafe {
+            let path = path.canonicalize().unwrap();
+            let preview_file = CString::new(&*path.to_string_lossy()).unwrap();
+            assert!(sys::SteamAPI_ISteamUGC_AddItemPreviewFile(
+                self.ugc,
+                self.handle,
+                preview_file.as_ptr(),
+                preview_type
+            ));
+        }
+        self
+    }
+
     #[must_use]
     pub fn content_path(self, path: &Path) -> Self {
         unsafe {
