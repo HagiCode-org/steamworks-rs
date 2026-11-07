@@ -926,6 +926,21 @@ impl UpdateHandle {
         self
     }
 
+    /// Removes the additional preview at `index` (0-based, the same index used by
+    /// `GetQueryUGCAdditionalPreview`) with `RemoveItemPreview`. The main preview cannot be removed this way;
+    /// replace it with [`UpdateHandle::preview_path`].
+    #[must_use]
+    pub fn remove_preview(self, index: u32) -> Self {
+        unsafe {
+            assert!(sys::SteamAPI_ISteamUGC_RemoveItemPreview(
+                self.ugc,
+                self.handle,
+                index
+            ));
+        }
+        self
+    }
+
     #[must_use]
     pub fn content_path(self, path: &Path) -> Self {
         unsafe {
