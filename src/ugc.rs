@@ -500,6 +500,103 @@ impl_callback!(cb: DownloadItemResult_t => DownloadItemResult {
     }
 });
 
+/// Outcome of a completed `add_dependency` or `remove_dependency` call.
+///
+/// A completed call with a non-OK Steam result is delivered as `Ok` carrying that code, so the caller
+/// can tell the reasons apart (missing child, denied request, limit reached). Only an I/O failure or a
+/// truncated result is an `Err`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UGCDependencyResult {
+    /// Raw `EResult`; `1` is `k_EResultOK`. Kept as an integer, so an unlisted value passes through unchanged.
+    pub result: u32,
+    pub published_file_id: PublishedFileId,
+    pub child_published_file_id: PublishedFileId,
+}
+
+impl UGCDependencyResult {
+    /// Whether Steam completed the call with `k_EResultOK`.
+    pub fn is_ok(&self) -> bool {
+        self.result == sys::EResult::k_EResultOK as u32
+    }
+}
+
+/// Turns one completed dependency call into its public outcome. Only `io_error` makes an `Err`;
+/// `raw`, `parent` and `child` are ignored when it is true.
+pub(crate) fn decode_dependency_result(
+    raw: u32,
+    parent: u64,
+    child: u64,
+    io_error: bool,
+) -> Result<UGCDependencyResult, SteamError> {
+    if io_error {
+        return Err(SteamError::IOFailure);
+    }
+    Ok(UGCDependencyResult {
+        result: raw,
+        published_file_id: PublishedFileId(parent),
+        child_published_file_id: PublishedFileId(child),
+    })
+}
+
+/// Global callback for a completed `AddUGCDependencyResult_t` (callback id 3412).
+///
+/// Built by hand rather than with `impl_callback!`: that macro reads the whole SDK struct, which forms
+/// the `EResult` enum from the raw bytes. Here `m_eResult` is read as an integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AddUGCDependencyResult {
+    pub result: u32,
+    pub published_file_id: PublishedFileId,
+    pub child_published_file_id: PublishedFileId,
+}
+
+unsafe impl Callback for AddUGCDependencyResult {
+    const ID: i32 = sys::AddUGCDependencyResult_t_k_iCallback as i32;
+
+    unsafe fn from_raw(raw: *mut c_void) -> Self {
+        let raw = raw.cast::<sys::AddUGCDependencyResult_t>();
+        Self {
+            result: std::ptr::addr_of!((*raw).m_eResult)
+                .cast::<u32>()
+                .read_unaligned(),
+            published_file_id: PublishedFileId(
+                std::ptr::addr_of!((*raw).m_nPublishedFileId).read_unaligned(),
+            ),
+            child_published_file_id: PublishedFileId(
+                std::ptr::addr_of!((*raw).m_nChildPublishedFileId).read_unaligned(),
+            ),
+        }
+    }
+}
+
+/// Global callback for a completed `RemoveUGCDependencyResult_t` (callback id 3413).
+///
+/// Built by hand for the same reason as [`AddUGCDependencyResult`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoveUGCDependencyResult {
+    pub result: u32,
+    pub published_file_id: PublishedFileId,
+    pub child_published_file_id: PublishedFileId,
+}
+
+unsafe impl Callback for RemoveUGCDependencyResult {
+    const ID: i32 = sys::RemoveUGCDependencyResult_t_k_iCallback as i32;
+
+    unsafe fn from_raw(raw: *mut c_void) -> Self {
+        let raw = raw.cast::<sys::RemoveUGCDependencyResult_t>();
+        Self {
+            result: std::ptr::addr_of!((*raw).m_eResult)
+                .cast::<u32>()
+                .read_unaligned(),
+            published_file_id: PublishedFileId(
+                std::ptr::addr_of!((*raw).m_nPublishedFileId).read_unaligned(),
+            ),
+            child_published_file_id: PublishedFileId(
+                std::ptr::addr_of!((*raw).m_nChildPublishedFileId).read_unaligned(),
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct InstallInfo {
@@ -833,6 +930,87 @@ impl UGC {
                             crate::error::check_raw_result(raw)
                         }
                     })
+                },
+            );
+        }
+    }
+
+    /// Marks `child` as a required item of `parent` with `ISteamUGC::AddDependency`.
+    ///
+    /// The callback runs once with the completed Steam result. A non-OK result is `Ok` with its code in
+    /// [`UGCDependencyResult::result`], not `Err`; only an I/O failure is `Err`.
+    pub fn add_dependency<F>(&self, parent: PublishedFileId, child: PublishedFileId, cb: F)
+    where
+        F: FnOnce(Result<UGCDependencyResult, SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_AddDependency(self.ugc, parent.0, child.0);
+            register_call_result_raw::<sys::AddUGCDependencyResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    let decoded = if io_error {
+                        decode_dependency_result(0, 0, 0, true)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full AddUGCDependencyResult_t.
+                        // The EResult is read as an integer, so an unlisted value never forms an enum.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        let published =
+                            std::ptr::addr_of!((*v).m_nPublishedFileId).read_unaligned();
+                        let child_id =
+                            std::ptr::addr_of!((*v).m_nChildPublishedFileId).read_unaligned();
+                        if crate::error::result_diagnostics_enabled() {
+                            eprintln!(
+                                "{}",
+                                crate::error::describe_raw_result("AddUGCDependencyResult_t", raw)
+                            );
+                        }
+                        decode_dependency_result(raw, published, child_id, false)
+                    };
+                    cb(decoded)
+                },
+            );
+        }
+    }
+
+    /// Removes the required-item dependency from `parent` to `child` with
+    /// `ISteamUGC::RemoveDependency`. The result is reported the same way as [`UGC::add_dependency`].
+    pub fn remove_dependency<F>(&self, parent: PublishedFileId, child: PublishedFileId, cb: F)
+    where
+        F: FnOnce(Result<UGCDependencyResult, SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_RemoveDependency(self.ugc, parent.0, child.0);
+            register_call_result_raw::<sys::RemoveUGCDependencyResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    let decoded = if io_error {
+                        decode_dependency_result(0, 0, 0, true)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full RemoveUGCDependencyResult_t.
+                        // The EResult is read as an integer, so an unlisted value never forms an enum.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        let published =
+                            std::ptr::addr_of!((*v).m_nPublishedFileId).read_unaligned();
+                        let child_id =
+                            std::ptr::addr_of!((*v).m_nChildPublishedFileId).read_unaligned();
+                        if crate::error::result_diagnostics_enabled() {
+                            eprintln!(
+                                "{}",
+                                crate::error::describe_raw_result(
+                                    "RemoveUGCDependencyResult_t",
+                                    raw
+                                )
+                            );
+                        }
+                        decode_dependency_result(raw, published, child_id, false)
+                    };
+                    cb(decoded)
                 },
             );
         }
@@ -1934,3 +2112,94 @@ impl fmt::Display for CreateQueryError {
     }
 }
 impl error::Error for CreateQueryError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Not a named `EResult`; it must reach the caller unchanged.
+    const UNLISTED_RESULT: u32 = 999999;
+
+    #[test]
+    fn ok_dependency_result_carries_code_and_both_ids() {
+        let result =
+            decode_dependency_result(sys::EResult::k_EResultOK as u32, 10, 20, false).unwrap();
+        assert_eq!(
+            result,
+            UGCDependencyResult {
+                result: 1,
+                published_file_id: PublishedFileId(10),
+                child_published_file_id: PublishedFileId(20),
+            }
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn named_non_ok_result_is_ok_with_its_code() {
+        let result =
+            decode_dependency_result(sys::EResult::k_EResultFail as u32, 10, 20, false).unwrap();
+        assert_eq!(result.result, sys::EResult::k_EResultFail as u32);
+        assert!(!result.is_ok());
+    }
+
+    #[test]
+    fn unlisted_result_passes_through_unchanged() {
+        let result = decode_dependency_result(UNLISTED_RESULT, 10, 20, false).unwrap();
+        assert_eq!(result.result, UNLISTED_RESULT);
+        assert!(!result.is_ok());
+    }
+
+    #[test]
+    fn io_failure_is_an_error() {
+        assert_eq!(
+            decode_dependency_result(0, 0, 0, true),
+            Err(SteamError::IOFailure)
+        );
+    }
+
+    #[test]
+    fn callback_ids_match_the_sdk() {
+        assert_eq!(AddUGCDependencyResult::ID, 3412);
+        assert_eq!(
+            AddUGCDependencyResult::ID,
+            sys::AddUGCDependencyResult_t_k_iCallback as i32
+        );
+        assert_eq!(RemoveUGCDependencyResult::ID, 3413);
+        assert_eq!(
+            RemoveUGCDependencyResult::ID,
+            sys::RemoveUGCDependencyResult_t_k_iCallback as i32
+        );
+    }
+
+    #[test]
+    fn callbacks_read_the_result_integer_and_both_ids() {
+        let mut raw = sys::AddUGCDependencyResult_t {
+            m_eResult: sys::EResult::k_EResultFail,
+            m_nPublishedFileId: 10,
+            m_nChildPublishedFileId: 20,
+        };
+        let added = unsafe {
+            AddUGCDependencyResult::from_raw(
+                (&mut raw as *mut sys::AddUGCDependencyResult_t).cast(),
+            )
+        };
+        assert_eq!(added.result, sys::EResult::k_EResultFail as u32);
+        assert_eq!(added.published_file_id, PublishedFileId(10));
+        assert_eq!(added.child_published_file_id, PublishedFileId(20));
+
+        let mut raw = sys::RemoveUGCDependencyResult_t {
+            m_eResult: sys::EResult::k_EResultOK,
+            m_nPublishedFileId: 30,
+            m_nChildPublishedFileId: 40,
+        };
+        let removed = unsafe {
+            RemoveUGCDependencyResult::from_raw(
+                (&mut raw as *mut sys::RemoveUGCDependencyResult_t).cast(),
+            )
+        };
+        assert_eq!(removed.result, 1);
+        assert_eq!(removed.published_file_id, PublishedFileId(30));
+        assert_eq!(removed.child_published_file_id, PublishedFileId(40));
+    }
+}
