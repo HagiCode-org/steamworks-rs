@@ -71,6 +71,8 @@ fn main() {
 `serde`: This feature enables serialization and deserialization of some types with `serde`.
 `image`: This feature allows accessing image data like icons with `image` crate.
 
+Workshop item dependencies: `UGC::add_dependency` and `UGC::remove_dependency` mark a published item as requiring another. They need no feature flag, and report the Steam result code (`UGCDependencyResult::result`, `1` is OK) rather than only success or failure.
+
 ## License
 This crate is dual-licensed under [Apache](./LICENSE-APACHE) and
 [MIT](./LICENSE-MIT), except for the files in [`steamworks-sys/lib/steam/`]
