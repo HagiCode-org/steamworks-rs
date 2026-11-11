@@ -15,6 +15,7 @@ use super::*;
 /// });
 /// ```
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct UserStatsReceived {
     pub steam_id: SteamId,
     pub game_id: GameId,
@@ -43,6 +44,7 @@ impl_callback!(cb: UserStatsReceived_t => UserStatsReceived {
 /// });
 /// ```
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct UserStatsStored {
     pub game_id: GameId,
     pub result: Result<(), SteamError>,
@@ -69,6 +71,7 @@ impl_callback!(cb: UserStatsStored_t => UserStatsStored {
 /// });
 /// ```
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct UserAchievementStored {
     pub game_id: GameId,
     pub achievement_name: String,

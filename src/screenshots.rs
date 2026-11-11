@@ -104,6 +104,7 @@ pub enum ScreenshotLibraryAddError {
 /// A screenshot has been requested by the user from the Steam screenshot hotkey.
 /// This will only be called if [`Screenshots::hook_screenshots`] has been enabled, in which case Steam will not take the screenshot itself.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ScreenshotRequested;
 
 impl_callback!(_cb: ScreenshotRequested_t => ScreenshotRequested {
@@ -111,6 +112,7 @@ impl_callback!(_cb: ScreenshotRequested_t => ScreenshotRequested {
 });
 
 #[derive(Clone, Debug, Error)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ScreenshotReadyError {
     /// The screenshot could not be loaded or parsed.
     #[error("The screenshot could not be loaded or parsed")]
@@ -122,6 +124,7 @@ pub enum ScreenshotReadyError {
 
 /// A screenshot successfully written or otherwise added to the library and can now be tagged.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ScreenshotReady {
     /// The screenshot handle that has been written.
     pub local_handle: Result<ScreenshotHandle, ScreenshotReadyError>,

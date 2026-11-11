@@ -239,12 +239,14 @@ fn test_auth_dll() {
 /// A handle for an authentication ticket that can be used to cancel
 /// it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct AuthTicket(pub(crate) sys::HAuthTicket);
 
 /// Called when generating a authentication session ticket.
 ///
 /// This can be used to verify the ticket was created successfully.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct AuthSessionTicketResponse {
     /// The ticket in question
     pub ticket: AuthTicket,
@@ -285,6 +287,7 @@ fn test_auth_webapi() {
 ///
 /// This can be used to verify the ticket was created successfully.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct TicketForWebApiResponse {
     pub ticket_handle: AuthTicket,
     pub result: SResult<()>,
@@ -304,6 +307,7 @@ impl_callback!(cb: GetTicketForWebApiResponse_t => TicketForWebApiResponse {
 /// Called when an authentication ticket has been
 /// validated.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ValidateAuthTicketResponse {
     /// The steam id of the entity that provided the ticket
     pub steam_id: SteamId,
@@ -411,6 +415,7 @@ impl_callback!(cb: SteamServerConnectFailure_t => SteamServerConnectFailure {
 
 /// Errors from `ValidateAuthTicketResponse`
 #[derive(Clone, Debug, Error)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum AuthSessionValidateError {
     /// The user in question is not connected to steam
     #[error("user not connected to steam")]
