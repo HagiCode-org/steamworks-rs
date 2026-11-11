@@ -4,8 +4,8 @@
 
 - Rust bindings to the Steamworks SDK. Crate `steamworks` 0.12.2 wraps the raw FFI crate `steamworks-sys` 0.12.0. README: SDK 1.62, MSRV 1.80.0.
 - License: MIT / Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). The SDK files under `steamworks-sys/lib/steam/` are excluded from that license.
-- This is the `ducky7go` fork of `Noxime/steamworks-rs` (the `repository` field in both `Cargo.toml` files points upstream; no `upstream` remote is configured here). The fork's visible change is `UpdateHandle::language` in `src/ugc.rs`, which wraps `SteamAPI_ISteamUGC_SetItemUpdateLanguage`. Keep upstream structure so changes can be contributed back.
-- Main consumer: `ducky7go/steamworks.js`, which vendors this repo as `vendor/steamworks-rs` with features `serde` and `raw-bindings`. Push changes here before bumping that submodule pointer there.
+- This is the `HagiCode-org` fork of `Noxime/steamworks-rs` (the `repository` field in both `Cargo.toml` files points upstream; no `upstream` remote is configured here). The fork's visible change is `UpdateHandle::language` in `src/ugc.rs`, which wraps `SteamAPI_ISteamUGC_SetItemUpdateLanguage`. Keep upstream structure so changes can be contributed back.
+- Main consumer: `HagiCode-org/steamworks.js`, which vendors this repo as `vendor/steamworks-rs` with features `serde` and `raw-bindings`. Push changes here before bumping that submodule pointer there.
 
 ## Layout
 
