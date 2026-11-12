@@ -14,6 +14,7 @@ Additions in this fork so far, all around Steam Workshop and callbacks:
 * `UpdateHandle::language`, wrapping `SteamAPI_ISteamUGC_SetItemUpdateLanguage`, to set a per-language title and description.
 * Additional Workshop previews: `num_additional_previews` and `get_additional_preview` on queries, and `UpdateHandle::add_preview_file` and `remove_preview` on updates.
 * Workshop item dependencies: `UGC::add_dependency` and `UGC::remove_dependency`.
+* Known game versions (Steam branches): `UpdateHandle::required_game_versions`, wrapping `SetRequiredGameVersions`, and `num_supported_game_versions`, `get_supported_game_version` and `supported_game_versions` on queries.
 * `serde` support for callback payloads, behind the `serde` feature.
 
 Upstream structure is kept where possible, so changes can be contributed back. There is no promise of staying in step with upstream, and this fork is consumed through git or as a submodule, not from crates.io. If you want the general-purpose crate, use upstream. All credit for the original work goes to its authors. Both license files are kept as they were.
