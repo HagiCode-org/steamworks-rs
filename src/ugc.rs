@@ -1241,6 +1241,26 @@ impl UpdateHandle {
         self
     }
 
+    /// Sets the game versions (Steam branches) this item is valid for.
+    ///
+    /// `min` and `max` are branch names such as `open_beta`. `None` leaves that end of the range
+    /// open: with both `None`, every game version is valid. Steam applies this only when the
+    /// item's content changes in the same update.
+    #[must_use]
+    pub fn required_game_versions(self, min: Option<&str>, max: Option<&str>) -> Self {
+        unsafe {
+            let min = CString::new(min.unwrap_or("")).unwrap();
+            let max = CString::new(max.unwrap_or("")).unwrap();
+            assert!(sys::SteamAPI_ISteamUGC_SetRequiredGameVersions(
+                self.ugc,
+                self.handle,
+                min.as_ptr(),
+                max.as_ptr()
+            ));
+        }
+        self
+    }
+
     pub fn submit<F>(self, change_note: Option<&str>, cb: F) -> UpdateWatchHandle
     where
         F: FnOnce(Result<(PublishedFileId, bool), SteamError>) + 'static + Send,
@@ -2068,6 +2088,78 @@ impl<'a> QueryResults<'a> {
             None
         }
     }
+
+    /// Returns how many game version ranges the item at `index` supports.
+    ///
+    /// Returns 0 if index was out of bounds.
+    pub fn num_supported_game_versions(&self, index: u32) -> u32 {
+        if index >= self.num_results_returned {
+            return 0;
+        }
+        unsafe { sys::SteamAPI_ISteamUGC_GetNumSupportedGameVersions(self.ugc, self.handle, index) }
+    }
+
+    /// Gets one supported game version range of the item at `index`.
+    ///
+    /// Returns None if `version_index` is out of bounds.
+    pub fn get_supported_game_version(
+        &self,
+        index: u32,
+        version_index: u32,
+    ) -> Option<SupportedGameVersion> {
+        let mut min = [0 as c_char; GAME_BRANCH_BUFFER_LEN];
+        let mut max = [0 as c_char; GAME_BRANCH_BUFFER_LEN];
+        let ok = unsafe {
+            sys::SteamAPI_ISteamUGC_GetSupportedGameVersionData(
+                self.ugc,
+                self.handle,
+                index,
+                version_index,
+                min.as_mut_ptr(),
+                max.as_mut_ptr(),
+                // Leave the last byte for the NUL terminator.
+                (GAME_BRANCH_BUFFER_LEN - 1) as u32,
+            )
+        };
+        ok.then(|| SupportedGameVersion {
+            min: game_branch_from_buffer(&min),
+            max: game_branch_from_buffer(&max),
+        })
+    }
+
+    /// Returns every game version range the item at `index` supports.
+    ///
+    /// Returns an empty list if the item has no range recorded, or if index was out of bounds.
+    pub fn supported_game_versions(&self, index: u32) -> Vec<SupportedGameVersion> {
+        (0..self.num_supported_game_versions(index))
+            .filter_map(|version_index| self.get_supported_game_version(index, version_index))
+            .collect()
+    }
+}
+
+/// Size of the buffers used to read a game branch name, including the NUL terminator.
+const GAME_BRANCH_BUFFER_LEN: usize = 256;
+
+/// Converts a branch name buffer written by the SDK. The SDK writes an empty string for an open end
+/// of the range, which becomes `None`.
+fn game_branch_from_buffer(buf: &[c_char]) -> Option<String> {
+    // The buffer's last byte is never written by the caller, so the string is always NUL-terminated.
+    let name = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.into_owned())
+    }
+}
+
+/// A game version (Steam branch) range that a Workshop item is valid for.
+///
+/// `min: None` means the range starts at the earliest branch; `max: None` means it runs through
+/// every branch published after `min`. Both `None` means every game version is valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportedGameVersion {
+    pub min: Option<String>,
+    pub max: Option<String>,
 }
 
 /// Query result
@@ -2201,5 +2293,20 @@ mod tests {
         assert_eq!(removed.result, 1);
         assert_eq!(removed.published_file_id, PublishedFileId(30));
         assert_eq!(removed.child_published_file_id, PublishedFileId(40));
+    }
+
+    #[test]
+    fn game_branch_buffer_maps_empty_to_open_end() {
+        let empty = [0 as c_char; 16];
+        assert_eq!(game_branch_from_buffer(&empty), None);
+
+        let mut named = [0 as c_char; 16];
+        for (slot, byte) in named.iter_mut().zip(b"open_beta") {
+            *slot = *byte as c_char;
+        }
+        assert_eq!(
+            game_branch_from_buffer(&named),
+            Some("open_beta".to_string())
+        );
     }
 }
