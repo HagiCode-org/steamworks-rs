@@ -4,7 +4,7 @@
 
 - Rust bindings to the Steamworks SDK. Crate `steamworks` 0.12.2 wraps the raw FFI crate `steamworks-sys` 0.12.0. README: SDK 1.62, MSRV 1.80.0.
 - License: MIT / Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). The SDK files under `steamworks-sys/lib/steam/` are excluded from that license.
-- This is the `HagiCode-org` fork of `Noxime/steamworks-rs` (the `repository` field in both `Cargo.toml` files points upstream; no `upstream` remote is configured here). The fork's visible change is `UpdateHandle::language` in `src/ugc.rs`, which wraps `SteamAPI_ISteamUGC_SetItemUpdateLanguage`. Keep upstream structure so changes can be contributed back.
+- This is the `HagiCode-org` personal fork of `Noxime/steamworks-rs` (the `repository` field in both `Cargo.toml` files points upstream; no `upstream` remote is configured here), shaped for agent use and the maintainer's own projects. The README's "About this fork" section lists the fork's additions: `UpdateHandle::language`, additional Workshop previews, item dependencies and serde callback payloads, all in `src/ugc.rs` and the callback types. Keep upstream structure so changes can be contributed back.
 - Main consumer: `HagiCode-org/steamworks.js`, which vendors this repo as `vendor/steamworks-rs` with features `serde` and `raw-bindings`. Push changes here before bumping that submodule pointer there.
 
 ## Layout
@@ -36,5 +36,5 @@
 
 - `.gitignore` ignores `Cargo.lock` and `steamworks-sys/lib/steam/*`, except `public/` and `redistributable_bin/`. A repository-wide `git add` will not pick up other SDK files.
 - The SDK headers and binaries are committed. Check their license terms before redistributing.
-- The README's feature list names only `serde` and `image`. `raw-bindings` is in `Cargo.toml` but not documented there. The README install snippet shows `steamworks = "0.12.0"`, the crates.io release rather than this fork.
+- The README install snippet uses a git dependency on this fork, because the crates.io `steamworks` crate is upstream. Keep it that way if you edit the README.
 - `updating-steamworks-sdk-version.md` links to the upstream `Noxime/steamworks-rs` Actions page, not this fork's.
