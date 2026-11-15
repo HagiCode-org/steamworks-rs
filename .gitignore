@@ -8,3 +8,6 @@ Cargo.lock
 steamworks-sys/lib/steam/*
 !steamworks-sys/lib/steam/redistributable_bin/
 !steamworks-sys/lib/steam/public/
+
+# Local deja session-rule export (auto-extracted from agent sessions; not committed)
+.deja/
