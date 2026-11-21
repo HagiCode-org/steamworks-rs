@@ -597,6 +597,208 @@ unsafe impl Callback for RemoveUGCDependencyResult {
     }
 }
 
+/// Outcome of a completed `add_app_dependency` or `remove_app_dependency` call.
+///
+/// As with [`UGCDependencyResult`], a completed call with a non-OK Steam result is `Ok` carrying that
+/// code. Only an I/O failure is `Err`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UGCAppDependencyResult {
+    /// Raw `EResult`; `1` is `k_EResultOK`. Kept as an integer, so an unlisted value passes through unchanged.
+    pub result: u32,
+    pub published_file_id: PublishedFileId,
+    pub app_id: AppId,
+}
+
+/// The current user's vote on a Workshop item, as returned by `get_user_item_vote`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct UserItemVote {
+    pub voted_up: bool,
+    pub voted_down: bool,
+    /// The user has neither voted up nor down.
+    pub vote_skipped: bool,
+}
+
+/// Whether `id` has the shape of a YouTube video ID: exactly 11 characters from `[A-Za-z0-9_-]`.
+pub(crate) fn is_youtube_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Rejects item ID 0, which Steam never assigns to a Workshop item.
+pub(crate) fn check_item_id(id: PublishedFileId) -> Result<(), SteamError> {
+    if id.0 == 0 {
+        Err(SteamError::InvalidParameter)
+    } else {
+        Ok(())
+    }
+}
+
+/// Rejects app ID 0.
+pub(crate) fn check_app_id(app_id: AppId) -> Result<(), SteamError> {
+    if app_id.0 == 0 {
+        Err(SteamError::InvalidParameter)
+    } else {
+        Ok(())
+    }
+}
+
+/// Builds the item array for `StartPlaytimeTracking` / `StopPlaytimeTracking`. An empty slice or an
+/// item ID 0 is rejected before any Steam call.
+pub(crate) fn playtime_item_array(
+    items: &[PublishedFileId],
+) -> Result<Vec<sys::PublishedFileId_t>, SteamError> {
+    if items.is_empty() {
+        return Err(SteamError::InvalidParameter);
+    }
+    items
+        .iter()
+        .map(|id| check_item_id(*id).map(|()| id.0))
+        .collect()
+}
+
+/// Maps the three vote flags of `GetUserItemVoteResult_t` to [`UserItemVote`].
+pub(crate) fn user_item_vote(voted_up: bool, voted_down: bool, vote_skipped: bool) -> UserItemVote {
+    UserItemVote {
+        voted_up,
+        voted_down,
+        vote_skipped,
+    }
+}
+
+/// Turns one completed app-dependency call into its public outcome. Only `io_error` makes an `Err`.
+pub(crate) fn decode_app_dependency_result(
+    raw: u32,
+    published_file_id: u64,
+    app_id: u32,
+    io_error: bool,
+) -> Result<UGCAppDependencyResult, SteamError> {
+    if io_error {
+        return Err(SteamError::IOFailure);
+    }
+    Ok(UGCAppDependencyResult {
+        result: raw,
+        published_file_id: PublishedFileId(published_file_id),
+        app_id: AppId(app_id),
+    })
+}
+
+/// Every app dependency of a Workshop item, as returned by [`UGC::get_app_dependencies`].
+///
+/// `app_ids` holds the IDs from every page Steam sent. When it is shorter than
+/// `total_app_dependencies`, the list is incomplete and the caller should say so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UGCAppDependencies {
+    /// Raw `EResult`; `1` is `k_EResultOK`. A non-OK code is reported with the IDs collected before it.
+    pub result: u32,
+    pub published_file_id: PublishedFileId,
+    pub app_ids: Vec<AppId>,
+    /// The total Steam reported with its last page.
+    pub total_app_dependencies: u32,
+}
+
+/// How many app IDs the SDK array of one `GetAppDependenciesResult_t` holds.
+const APP_DEPENDENCY_PAGE_LEN: usize = 32;
+
+/// One `GetAppDependenciesResult_t` page: the IDs in it and the running total.
+///
+/// Built by hand for the same reason as [`AddUGCDependencyResult`]: `m_eResult` is read as an integer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AppDependencyPage {
+    pub(crate) result: u32,
+    pub(crate) published_file_id: PublishedFileId,
+    pub(crate) app_ids: Vec<AppId>,
+    pub(crate) total: u32,
+}
+
+unsafe impl Callback for AppDependencyPage {
+    const ID: i32 = sys::GetAppDependenciesResult_t_k_iCallback as i32;
+
+    unsafe fn from_raw(raw: *mut c_void) -> Self {
+        let raw = raw.cast::<sys::GetAppDependenciesResult_t>();
+        // The count is clamped to the array, so a bad count never reads past it.
+        let count = (std::ptr::addr_of!((*raw).m_nNumAppDependencies).read_unaligned() as usize)
+            .min(APP_DEPENDENCY_PAGE_LEN);
+        let ids = std::ptr::addr_of!((*raw).m_rgAppIDs).cast::<u32>();
+        Self {
+            result: std::ptr::addr_of!((*raw).m_eResult)
+                .cast::<u32>()
+                .read_unaligned(),
+            published_file_id: PublishedFileId(
+                std::ptr::addr_of!((*raw).m_nPublishedFileId).read_unaligned(),
+            ),
+            app_ids: (0..count)
+                .map(|i| AppId(ids.add(i).read_unaligned()))
+                .collect(),
+            total: std::ptr::addr_of!((*raw).m_nTotalNumAppDependencies).read_unaligned(),
+        }
+    }
+}
+
+/// A `get_app_dependencies` call still waiting for its last page.
+struct PendingAppDependencies {
+    app_ids: Vec<AppId>,
+    cb: Box<dyn FnOnce(Result<UGCAppDependencies, SteamError>) + Send>,
+}
+
+/// Collection state for `get_app_dependencies`, kept on each client and server.
+///
+/// Steam reports the pages through one global callback, and a callback ID holds one handler at a
+/// time. The handler is therefore registered once and routes each page to the call for its item.
+#[derive(Default)]
+pub(crate) struct AppDependencyPages {
+    handler: Mutex<Option<CallbackHandle>>,
+    pending: Arc<Mutex<HashMap<u64, PendingAppDependencies>>>,
+}
+
+/// Adds one page to the IDs collected so far. Returns the finished outcome when no page is due: the
+/// total is reached, Steam returned a non-OK result, or a page came back empty. Steam sends nothing
+/// after an empty page, so waiting for one would never end; the total then shows the list is short.
+fn fold_app_dependency_page(
+    collected: &mut Vec<AppId>,
+    page: &AppDependencyPage,
+) -> Option<UGCAppDependencies> {
+    let finish = |collected: &mut Vec<AppId>| UGCAppDependencies {
+        result: page.result,
+        published_file_id: page.published_file_id,
+        app_ids: std::mem::take(collected),
+        total_app_dependencies: page.total,
+    };
+    if page.result != sys::EResult::k_EResultOK as u32 {
+        return Some(finish(collected));
+    }
+    collected.extend_from_slice(&page.app_ids);
+    if page.app_ids.is_empty() || collected.len() as u64 >= u64::from(page.total) {
+        Some(finish(collected))
+    } else {
+        None
+    }
+}
+
+/// Sends one page to the call waiting for its item. A page for an item with no waiting call is ignored.
+fn route_app_dependency_page(
+    pending: &Mutex<HashMap<u64, PendingAppDependencies>>,
+    page: AppDependencyPage,
+) {
+    let id = page.published_file_id.0;
+    let mut waiting = pending.lock().unwrap();
+    let Some(mut entry) = waiting.remove(&id) else {
+        return;
+    };
+    match fold_app_dependency_page(&mut entry.app_ids, &page) {
+        None => {
+            waiting.insert(id, entry);
+        }
+        Some(outcome) => {
+            // Release the lock before the caller's closure runs, so the closure may start another call.
+            drop(waiting);
+            (entry.cb)(Ok(outcome));
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct InstallInfo {
@@ -1015,6 +1217,345 @@ impl UGC {
             );
         }
     }
+
+    /// Votes on a Workshop item: `vote_up` true votes up, false votes down.
+    ///
+    /// **Changes the current user's account state** (their vote on the item). Item ID 0 is rejected
+    /// through `cb` before any Steam call.
+    pub fn set_user_item_vote<F>(&self, item: PublishedFileId, vote_up: bool, cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        if let Err(e) = check_item_id(item) {
+            cb(Err(e));
+            return;
+        }
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_SetUserItemVote(self.ugc, item.0, vote_up);
+            register_call_result_raw::<sys::SetUserItemVoteResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full SetUserItemVoteResult_t.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw)
+                    })
+                },
+            );
+        }
+    }
+
+    /// Reads the current user's vote on a Workshop item. This only reads, so it changes nothing.
+    /// Item ID 0 is rejected through `cb` before any Steam call.
+    pub fn get_user_item_vote<F>(&self, item: PublishedFileId, cb: F)
+    where
+        F: FnOnce(Result<UserItemVote, SteamError>) + 'static + Send,
+    {
+        if let Err(e) = check_item_id(item) {
+            cb(Err(e));
+            return;
+        }
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_GetUserItemVote(self.ugc, item.0);
+            register_call_result_raw::<sys::GetUserItemVoteResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full GetUserItemVoteResult_t.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw).map(|_| {
+                            user_item_vote(
+                                std::ptr::addr_of!((*v).m_bVotedUp).read_unaligned(),
+                                std::ptr::addr_of!((*v).m_bVotedDown).read_unaligned(),
+                                std::ptr::addr_of!((*v).m_bVoteSkipped).read_unaligned(),
+                            )
+                        })
+                    })
+                },
+            );
+        }
+    }
+
+    /// Adds an item to the current user's favorites for `app_id`.
+    ///
+    /// **Changes the current user's account state.** Item ID 0 is rejected through `cb` before any
+    /// Steam call.
+    pub fn add_item_to_favorites<F>(&self, app_id: AppId, item: PublishedFileId, cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        if let Err(e) = check_item_id(item) {
+            cb(Err(e));
+            return;
+        }
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_AddItemToFavorites(self.ugc, app_id.0, item.0);
+            register_call_result_raw::<sys::UserFavoriteItemsListChanged_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full UserFavoriteItemsListChanged_t.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw)
+                    })
+                },
+            );
+        }
+    }
+
+    /// Removes an item from the current user's favorites for `app_id`.
+    ///
+    /// **Changes the current user's account state.** Item ID 0 is rejected through `cb` before any
+    /// Steam call.
+    pub fn remove_item_from_favorites<F>(&self, app_id: AppId, item: PublishedFileId, cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        if let Err(e) = check_item_id(item) {
+            cb(Err(e));
+            return;
+        }
+        unsafe {
+            let api_call =
+                sys::SteamAPI_ISteamUGC_RemoveItemFromFavorites(self.ugc, app_id.0, item.0);
+            register_call_result_raw::<sys::UserFavoriteItemsListChanged_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full UserFavoriteItemsListChanged_t.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw)
+                    })
+                },
+            );
+        }
+    }
+
+    /// Starts playtime tracking for the given items.
+    ///
+    /// **Changes the current user's account state** (their usage tracking). An empty slice or an item
+    /// ID 0 is rejected through `cb` before any Steam call.
+    pub fn start_playtime_tracking<F>(&self, items: &[PublishedFileId], cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        let mut ids = match playtime_item_array(items) {
+            Ok(ids) => ids,
+            Err(e) => {
+                cb(Err(e));
+                return;
+            }
+        };
+        let Ok(count) = u32::try_from(ids.len()) else {
+            cb(Err(SteamError::InvalidParameter));
+            return;
+        };
+        unsafe {
+            let api_call =
+                sys::SteamAPI_ISteamUGC_StartPlaytimeTracking(self.ugc, ids.as_mut_ptr(), count);
+            register_call_result_raw::<sys::StartPlaytimeTrackingResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full StartPlaytimeTrackingResult_t.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw)
+                    })
+                },
+            );
+        }
+    }
+
+    /// Stops playtime tracking for the given items.
+    ///
+    /// **Changes the current user's account state** (their usage tracking). An empty slice or an item
+    /// ID 0 is rejected through `cb` before any Steam call.
+    pub fn stop_playtime_tracking<F>(&self, items: &[PublishedFileId], cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        let mut ids = match playtime_item_array(items) {
+            Ok(ids) => ids,
+            Err(e) => {
+                cb(Err(e));
+                return;
+            }
+        };
+        let Ok(count) = u32::try_from(ids.len()) else {
+            cb(Err(SteamError::InvalidParameter));
+            return;
+        };
+        unsafe {
+            let api_call =
+                sys::SteamAPI_ISteamUGC_StopPlaytimeTracking(self.ugc, ids.as_mut_ptr(), count);
+            register_call_result_raw::<sys::StopPlaytimeTrackingResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full StopPlaytimeTrackingResult_t.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        crate::error::check_raw_result(raw)
+                    })
+                },
+            );
+        }
+    }
+
+    /// Adds `app_id` as an app dependency of a Workshop item with `AddAppDependency`.
+    ///
+    /// **Changes the item's remote state.** Item ID 0 and app ID 0 are rejected through `cb` before any
+    /// Steam call. As with [`UGC::add_dependency`], a non-OK Steam result is `Ok` with its code.
+    pub fn add_app_dependency<F>(&self, item: PublishedFileId, app_id: AppId, cb: F)
+    where
+        F: FnOnce(Result<UGCAppDependencyResult, SteamError>) + 'static + Send,
+    {
+        if let Err(e) = check_item_id(item).and_then(|()| check_app_id(app_id)) {
+            cb(Err(e));
+            return;
+        }
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_AddAppDependency(self.ugc, item.0, app_id.0);
+            register_call_result_raw::<sys::AddAppDependencyResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    let decoded = if io_error {
+                        decode_app_dependency_result(0, 0, 0, true)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full AddAppDependencyResult_t.
+                        // The EResult is read as an integer, so an unlisted value never forms an enum.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        let published =
+                            std::ptr::addr_of!((*v).m_nPublishedFileId).read_unaligned();
+                        let app = std::ptr::addr_of!((*v).m_nAppID).read_unaligned();
+                        decode_app_dependency_result(raw, published, app, false)
+                    };
+                    cb(decoded)
+                },
+            );
+        }
+    }
+
+    /// Removes `app_id` from the app dependencies of a Workshop item with `RemoveAppDependency`.
+    ///
+    /// **Changes the item's remote state.** Item ID 0 and app ID 0 are rejected through `cb` before any
+    /// Steam call. The result is reported the same way as [`UGC::add_app_dependency`].
+    pub fn remove_app_dependency<F>(&self, item: PublishedFileId, app_id: AppId, cb: F)
+    where
+        F: FnOnce(Result<UGCAppDependencyResult, SteamError>) + 'static + Send,
+    {
+        if let Err(e) = check_item_id(item).and_then(|()| check_app_id(app_id)) {
+            cb(Err(e));
+            return;
+        }
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_RemoveAppDependency(self.ugc, item.0, app_id.0);
+            register_call_result_raw::<sys::RemoveAppDependencyResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    let decoded = if io_error {
+                        decode_app_dependency_result(0, 0, 0, true)
+                    } else {
+                        // SAFETY: io_error is false, so v points at a full RemoveAppDependencyResult_t.
+                        // The EResult is read as an integer, so an unlisted value never forms an enum.
+                        let raw = std::ptr::addr_of!((*v).m_eResult)
+                            .cast::<u32>()
+                            .read_unaligned();
+                        let published =
+                            std::ptr::addr_of!((*v).m_nPublishedFileId).read_unaligned();
+                        let app = std::ptr::addr_of!((*v).m_nAppID).read_unaligned();
+                        decode_app_dependency_result(raw, published, app, false)
+                    };
+                    cb(decoded)
+                },
+            );
+        }
+    }
+}
+
+impl UGC {
+    /// Asks Steam for every app dependency of a Workshop item with `GetAppDependencies`.
+    ///
+    /// Steam sends the IDs in pages of up to 32 through the global `GetAppDependenciesResult_t` callback.
+    /// They are collected until the total Steam reports is reached, then `cb` runs once with them, from
+    /// the next `run_callbacks` call. Item ID 0 is rejected through `cb` before any Steam call. A second
+    /// call for the same item while the first still waits is refused with [`SteamError::InvalidState`].
+    ///
+    /// **Not verified against a live Steam client.** The paging follows the SDK header comment; no
+    /// recorded run has confirmed it. If Steam never sends the last page, `cb` never runs.
+    pub fn get_app_dependencies<F>(&self, item: PublishedFileId, cb: F)
+    where
+        F: FnOnce(Result<UGCAppDependencies, SteamError>) + 'static + Send,
+    {
+        if let Err(e) = check_item_id(item) {
+            cb(Err(e));
+            return;
+        }
+        let pages = &self.inner.app_dependency_pages;
+        {
+            let mut handler = pages.handler.lock().unwrap();
+            if handler.is_none() {
+                let routed = Arc::clone(&pages.pending);
+                *handler = Some(unsafe {
+                    register_callback(&self.inner, move |page: AppDependencyPage| {
+                        route_app_dependency_page(&routed, page)
+                    })
+                });
+            }
+        }
+        {
+            let mut waiting = pages.pending.lock().unwrap();
+            if waiting.contains_key(&item.0) {
+                drop(waiting);
+                cb(Err(SteamError::InvalidState));
+                return;
+            }
+            waiting.insert(
+                item.0,
+                PendingAppDependencies {
+                    app_ids: Vec::new(),
+                    cb: Box::new(cb),
+                },
+            );
+        }
+        // The returned API call handle is not registered: the pages arrive through the callback above.
+        unsafe {
+            sys::SteamAPI_ISteamUGC_GetAppDependencies(self.ugc, item.0);
+        }
+    }
 }
 
 impl UGC {
@@ -1104,6 +1645,27 @@ impl UpdateHandle {
         self
     }
 
+    /// Adds a YouTube video as an additional preview with `AddItemPreviewVideo`.
+    ///
+    /// `video_id` is the 11-character YouTube ID (`[A-Za-z0-9_-]`), not a URL. Any other value returns
+    /// [`SteamError::InvalidParameter`] before Steam is called. No file is read; use
+    /// [`UpdateHandle::add_preview_file`] for images.
+    pub fn add_preview_video(self, video_id: &str) -> Result<Self, SteamError> {
+        if !is_youtube_video_id(video_id) {
+            return Err(SteamError::InvalidParameter);
+        }
+        unsafe {
+            // The ID is ASCII alphanumeric, `_` or `-` only, so it has no interior NUL.
+            let video_id = CString::new(video_id).unwrap();
+            assert!(sys::SteamAPI_ISteamUGC_AddItemPreviewVideo(
+                self.ugc,
+                self.handle,
+                video_id.as_ptr()
+            ));
+        }
+        Ok(self)
+    }
+
     /// Removes the additional preview at `index` (0-based, the same index used by
     /// `GetQueryUGCAdditionalPreview`) with `RemoveItemPreview`. The main preview cannot be removed this way;
     /// replace it with [`UpdateHandle::preview_path`].
@@ -1133,6 +1695,8 @@ impl UpdateHandle {
         self
     }
 
+    /// Sets the item's developer metadata. The SDK caps it at `k_cchDeveloperMetadataMax` (5000) bytes;
+    /// a longer value makes the SDK call fail, which panics here like the other setters.
     #[must_use]
     pub fn metadata(self, metadata: &str) -> Self {
         unsafe {
@@ -1184,6 +1748,9 @@ impl UpdateHandle {
         self
     }
 
+    /// Removes every key-value tag with `key`, whatever its values, as the SDK header describes.
+    /// The SDK header does not say how mixed calls interact, so a caller that resets tags should
+    /// call [`UpdateHandle::remove_all_key_value_tags`], then this, then [`UpdateHandle::add_key_value_tag`].
     pub fn remove_key_value_tag(self, key: &str) -> Self {
         unsafe {
             let key = CString::new(key).unwrap();
@@ -2264,6 +2831,156 @@ mod tests {
         );
     }
 
+    fn app_page(result: u32, id: u64, app_ids: &[u32], total: u32) -> AppDependencyPage {
+        AppDependencyPage {
+            result,
+            published_file_id: PublishedFileId(id),
+            app_ids: app_ids.iter().map(|app| AppId(*app)).collect(),
+            total,
+        }
+    }
+
+    /// Feeds a fake page source to the fold in the order Steam would send it, and returns the first
+    /// finished outcome, or `None` if the source ends while the call is still waiting.
+    fn collect_app_pages(source: &[AppDependencyPage]) -> Option<UGCAppDependencies> {
+        let mut collected = Vec::new();
+        source
+            .iter()
+            .find_map(|page| fold_app_dependency_page(&mut collected, page))
+    }
+
+    #[test]
+    fn get_app_dependencies_callback_id_matches_the_sdk() {
+        assert_eq!(AppDependencyPage::ID, 3416);
+        assert_eq!(
+            AppDependencyPage::ID,
+            sys::GetAppDependenciesResult_t_k_iCallback as i32
+        );
+    }
+
+    #[test]
+    fn app_dependency_page_reads_the_ids_it_holds_and_clamps_the_count() {
+        let mut raw: sys::GetAppDependenciesResult_t = unsafe { std::mem::zeroed() };
+        raw.m_eResult = sys::EResult::k_EResultOK;
+        raw.m_nPublishedFileId = 10;
+        raw.m_nNumAppDependencies = 2;
+        raw.m_nTotalNumAppDependencies = 3;
+        raw.m_rgAppIDs[0] = 480;
+        raw.m_rgAppIDs[1] = 730;
+        let page = unsafe {
+            AppDependencyPage::from_raw((&mut raw as *mut sys::GetAppDependenciesResult_t).cast())
+        };
+        assert_eq!(page.result, sys::EResult::k_EResultOK as u32);
+        assert_eq!(page.published_file_id, PublishedFileId(10));
+        assert_eq!(page.app_ids, vec![AppId(480), AppId(730)]);
+        assert_eq!(page.total, 3);
+
+        // A count larger than the SDK array must not read past it.
+        raw.m_nNumAppDependencies = 99;
+        let page = unsafe {
+            AppDependencyPage::from_raw((&mut raw as *mut sys::GetAppDependenciesResult_t).cast())
+        };
+        assert_eq!(page.app_ids.len(), APP_DEPENDENCY_PAGE_LEN);
+    }
+
+    #[test]
+    fn app_dependency_pages_are_collected_until_the_total_is_reached() {
+        let ok = sys::EResult::k_EResultOK as u32;
+        let done = collect_app_pages(&[
+            app_page(ok, 10, &[480, 730], 3),
+            app_page(ok, 10, &[570], 3),
+        ]);
+        assert_eq!(
+            done,
+            Some(UGCAppDependencies {
+                result: ok,
+                published_file_id: PublishedFileId(10),
+                app_ids: vec![AppId(480), AppId(730), AppId(570)],
+                total_app_dependencies: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn app_dependency_call_keeps_waiting_while_the_total_is_not_reached() {
+        let ok = sys::EResult::k_EResultOK as u32;
+        assert_eq!(collect_app_pages(&[app_page(ok, 10, &[480], 3)]), None);
+    }
+
+    #[test]
+    fn a_single_full_page_finishes_the_call() {
+        let ok = sys::EResult::k_EResultOK as u32;
+        let done = collect_app_pages(&[app_page(ok, 10, &[480], 1)]).unwrap();
+        assert_eq!(done.app_ids, vec![AppId(480)]);
+        assert_eq!(done.total_app_dependencies, 1);
+    }
+
+    #[test]
+    fn an_item_with_no_app_dependencies_finishes_empty() {
+        let ok = sys::EResult::k_EResultOK as u32;
+        let done = collect_app_pages(&[app_page(ok, 10, &[], 0)]).unwrap();
+        assert!(done.app_ids.is_empty());
+        assert_eq!(done.total_app_dependencies, 0);
+    }
+
+    #[test]
+    fn an_empty_page_ends_the_call_short_instead_of_waiting_forever() {
+        let ok = sys::EResult::k_EResultOK as u32;
+        let done = collect_app_pages(&[app_page(ok, 10, &[], 5)]).unwrap();
+        assert!(done.app_ids.is_empty());
+        assert_eq!(done.total_app_dependencies, 5);
+    }
+
+    #[test]
+    fn a_failed_page_ends_the_call_with_the_ids_before_it() {
+        let ok = sys::EResult::k_EResultOK as u32;
+        let fail = sys::EResult::k_EResultFail as u32;
+        let done = collect_app_pages(&[app_page(ok, 10, &[480], 3), app_page(fail, 10, &[730], 3)])
+            .unwrap();
+        assert_eq!(done.result, fail);
+        assert_eq!(done.app_ids, vec![AppId(480)]);
+        assert_eq!(done.total_app_dependencies, 3);
+    }
+
+    #[test]
+    fn a_page_reaches_only_the_call_waiting_for_its_item() {
+        let ok = sys::EResult::k_EResultOK as u32;
+        let got: Arc<Mutex<Option<Result<UGCAppDependencies, SteamError>>>> =
+            Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&got);
+        let pending = Mutex::new(HashMap::new());
+        pending.lock().unwrap().insert(
+            10,
+            PendingAppDependencies {
+                app_ids: Vec::new(),
+                cb: Box::new(move |outcome: Result<UGCAppDependencies, SteamError>| {
+                    *sink.lock().unwrap() = Some(outcome);
+                }),
+            },
+        );
+
+        // A page for another item is ignored and the waiting call stays.
+        route_app_dependency_page(&pending, app_page(ok, 99, &[480], 1));
+        assert!(got.lock().unwrap().is_none());
+        assert_eq!(pending.lock().unwrap().len(), 1);
+
+        // A page that does not complete the total keeps the call waiting.
+        route_app_dependency_page(&pending, app_page(ok, 10, &[480], 2));
+        assert!(got.lock().unwrap().is_none());
+
+        route_app_dependency_page(&pending, app_page(ok, 10, &[730], 2));
+        assert!(pending.lock().unwrap().is_empty());
+        assert_eq!(
+            got.lock().unwrap().take(),
+            Some(Ok(UGCAppDependencies {
+                result: ok,
+                published_file_id: PublishedFileId(10),
+                app_ids: vec![AppId(480), AppId(730)],
+                total_app_dependencies: 2,
+            }))
+        );
+    }
+
     #[test]
     fn callbacks_read_the_result_integer_and_both_ids() {
         let mut raw = sys::AddUGCDependencyResult_t {
@@ -2307,6 +3024,101 @@ mod tests {
         assert_eq!(
             game_branch_from_buffer(&named),
             Some("open_beta".to_string())
+        );
+    }
+
+    #[test]
+    fn youtube_video_id_must_be_eleven_url_safe_characters() {
+        assert!(is_youtube_video_id("dQw4w9WgXcQ"));
+        assert!(is_youtube_video_id("a-b_C9z-0_Q"));
+        // too short, too long, illegal characters, empty, and a non-ASCII byte
+        assert!(!is_youtube_video_id("dQw4w9WgXc"));
+        assert!(!is_youtube_video_id("dQw4w9WgXcQQ"));
+        assert!(!is_youtube_video_id("dQw4w9WgX/Q"));
+        assert!(!is_youtube_video_id("dQw4w9Wg Q"));
+        assert!(!is_youtube_video_id(""));
+        assert!(!is_youtube_video_id("dQw4w9WgXcé"));
+    }
+
+    #[test]
+    fn item_id_zero_is_rejected_before_any_call() {
+        assert_eq!(
+            check_item_id(PublishedFileId(0)),
+            Err(SteamError::InvalidParameter)
+        );
+        assert_eq!(check_item_id(PublishedFileId(1)), Ok(()));
+    }
+
+    #[test]
+    fn app_id_zero_is_rejected_before_any_call() {
+        assert_eq!(check_app_id(AppId(0)), Err(SteamError::InvalidParameter));
+        assert_eq!(check_app_id(AppId(480)), Ok(()));
+    }
+
+    #[test]
+    fn playtime_array_rejects_empty_and_zero_ids() {
+        assert_eq!(playtime_item_array(&[]), Err(SteamError::InvalidParameter));
+        assert_eq!(
+            playtime_item_array(&[PublishedFileId(5), PublishedFileId(0)]),
+            Err(SteamError::InvalidParameter)
+        );
+    }
+
+    #[test]
+    fn playtime_array_keeps_order_and_values() {
+        assert_eq!(
+            playtime_item_array(&[PublishedFileId(7), PublishedFileId(9)]),
+            Ok(vec![7, 9])
+        );
+    }
+
+    #[test]
+    fn vote_flags_map_to_the_vote_state() {
+        assert_eq!(
+            user_item_vote(true, false, false),
+            UserItemVote {
+                voted_up: true,
+                voted_down: false,
+                vote_skipped: false,
+            }
+        );
+        assert_eq!(
+            user_item_vote(false, false, true),
+            UserItemVote {
+                voted_up: false,
+                voted_down: false,
+                vote_skipped: true,
+            }
+        );
+    }
+
+    #[test]
+    fn app_dependency_result_keeps_code_and_both_ids() {
+        let ok =
+            decode_app_dependency_result(sys::EResult::k_EResultOK as u32, 10, 480, false).unwrap();
+        assert_eq!(
+            ok,
+            UGCAppDependencyResult {
+                result: 1,
+                published_file_id: PublishedFileId(10),
+                app_id: AppId(480),
+            }
+        );
+        // a named Steam failure is Ok with its code, as for the item-dependency calls
+        let failed =
+            decode_app_dependency_result(sys::EResult::k_EResultFail as u32, 10, 480, false)
+                .unwrap();
+        assert_eq!(failed.result, sys::EResult::k_EResultFail as u32);
+        assert_ne!(failed.result, sys::EResult::k_EResultOK as u32);
+        assert_eq!(
+            decode_app_dependency_result(UNLISTED_RESULT, 10, 480, false)
+                .unwrap()
+                .result,
+            UNLISTED_RESULT
+        );
+        assert_eq!(
+            decode_app_dependency_result(0, 0, 0, true),
+            Err(SteamError::IOFailure)
         );
     }
 }

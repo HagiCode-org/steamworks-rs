@@ -101,6 +101,7 @@ struct Inner {
     manager: Manager,
     callbacks: Callbacks,
     networking_sockets_data: Mutex<NetworkingSocketsData>,
+    app_dependency_pages: ugc::AppDependencyPages,
 }
 
 struct Callbacks {
@@ -273,6 +274,7 @@ impl Client {
                     independent_connections: Default::default(),
                     connection_callback: Default::default(),
                 }),
+                app_dependency_pages: Default::default(),
             });
             Ok(Client { inner: client })
         }

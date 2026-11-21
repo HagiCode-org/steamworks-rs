@@ -149,6 +149,7 @@ impl Server {
                     independent_connections: Default::default(),
                     connection_callback: Default::default(),
                 }),
+                app_dependency_pages: Default::default(),
             });
             Ok((
                 Server {
