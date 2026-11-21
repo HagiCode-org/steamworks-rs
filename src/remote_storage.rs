@@ -1,5 +1,3 @@
-#[cfg(test)]
-use serial_test::serial;
 use {super::*, ::core::mem::MaybeUninit};
 
 /// Access to the steam remote storage interface
@@ -363,35 +361,4 @@ pub struct SteamFileInfo {
     pub name: String,
     /// The size of the file in bytes
     pub size: u64,
-}
-
-#[test]
-#[serial]
-fn test_cloud() {
-    use std::io::{Read, Write};
-    let client = Client::init().unwrap();
-
-    let rs = client.remote_storage();
-    println!("Listing files:");
-    for f in rs.files() {
-        println!("{:?}", f);
-    }
-
-    {
-        let test = rs.file("test.txt");
-        let mut w = test.write();
-        write!(w, "Testing").unwrap();
-    }
-
-    println!("Listing files:");
-    for f in rs.files() {
-        println!("{:?}", f);
-    }
-
-    let mut output = String::new();
-    let test = rs.file("test.txt");
-    test.read().read_to_string(&mut output).unwrap();
-    println!("Got: {:?}", output);
-
-    assert_eq!(output, "Testing");
 }

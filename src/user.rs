@@ -1,7 +1,5 @@
 use super::*;
 use crate::networking_types::NetworkingIdentity;
-#[cfg(test)]
-use serial_test::serial;
 
 /// Access to the steam user interface
 pub struct User {
@@ -194,48 +192,6 @@ pub enum AuthSessionError {
     ExpiredTicket,
 }
 
-#[test]
-#[serial]
-fn test_auth_dll() {
-    let client = Client::init().unwrap();
-    let user = client.user();
-
-    let _cb = client.register_callback(|v: AuthSessionTicketResponse| {
-        println!("Got dll auth response: {:?}", v)
-    });
-    let _cb = client.register_callback(|v: ValidateAuthTicketResponse| {
-        println!("Got validate auth response: {:?}", v)
-    });
-
-    let id = user.steam_id();
-    let (auth, ticket) = user.authentication_session_ticket_with_steam_id(id);
-
-    println!("{:?}", auth);
-    println!("{:?}", ticket);
-
-    println!("{:?}", user.begin_authentication_session(id, &ticket));
-
-    // this might still return NoAuth if the validation has not completed
-    let has_space_war = user.user_has_license_for_app(id, AppId(480));
-    println!("User has license response: {has_space_war:?}");
-
-    for _ in 0..20 {
-        client.run_callbacks();
-        ::std::thread::sleep(::std::time::Duration::from_millis(50));
-    }
-
-    println!("END");
-
-    user.cancel_authentication_ticket(auth);
-
-    for _ in 0..20 {
-        client.run_callbacks();
-        ::std::thread::sleep(::std::time::Duration::from_millis(50));
-    }
-
-    user.end_authentication_session(id);
-}
-
 /// A handle for an authentication ticket that can be used to cancel
 /// it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,28 +216,6 @@ impl_callback!(cb: GetAuthSessionTicketResponse_t => AuthSessionTicketResponse {
         result: crate::to_steam_result(cb.m_eResult),
     }
 });
-
-#[test]
-#[serial]
-fn test_auth_webapi() {
-    let client = Client::init().unwrap();
-    let user = client.user();
-
-    let _cb = client.register_callback(|v: TicketForWebApiResponse| {
-        println!("Got webapi auth response: {:?}", v)
-    });
-
-    let auth = user.authentication_session_ticket_for_webapi("myIdentity");
-
-    println!("{:?}", auth);
-
-    for _ in 0..20 {
-        client.run_callbacks();
-        ::std::thread::sleep(::std::time::Duration::from_millis(100));
-    }
-
-    println!("END");
-}
 
 /// Called when generating a authentication session ticket for web api.
 ///

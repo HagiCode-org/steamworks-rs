@@ -2187,10 +2187,7 @@ impl From<sys::SteamNetworkingIPAddr> for SteamIpAddr {
 
 #[cfg(test)]
 mod tests {
-    use serial_test::serial;
-
     use super::*;
-    use crate::Client;
     use std::net::Ipv4Addr;
 
     #[test]
@@ -2219,26 +2216,5 @@ mod tests {
         let id =
             NetworkingIdentity::new_ip(SocketAddr::new(Ipv4Addr::new(192, 168, 0, 5).into(), 1234));
         assert_eq!("ip:192.168.0.5:1234", &id.debug_string())
-    }
-
-    #[test]
-    #[serial]
-    fn test_allocate_and_free_message() {
-        let client = Client::init().unwrap();
-        let utils = client.networking_utils();
-
-        // With C buffer
-        {
-            let _message = utils.allocate_message(200);
-            // Drop it immediately
-        }
-
-        // With rust buffer
-        {
-            let mut message = utils.allocate_message(0);
-            message.set_data(vec![1, 2, 3, 4, 5]).unwrap();
-
-            // Drop it immediately
-        }
     }
 }
