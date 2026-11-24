@@ -184,30 +184,11 @@ impl UserStats {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
                     } else {
-                        let len = v.m_cEntryCount;
-                        let mut entries = Vec::with_capacity(len as usize);
-                        for idx in 0..len {
-                            let mut entry: sys::LeaderboardEntry_t = std::mem::zeroed();
-                            let mut details = Vec::with_capacity(max_details_len);
-
-                            sys::SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(
-                                user_stats as *mut _,
-                                v.m_hSteamLeaderboardEntries,
-                                idx,
-                                &mut entry,
-                                details.as_mut_ptr(),
-                                max_details_len as _,
-                            );
-                            details.set_len(entry.m_cDetails as usize);
-
-                            entries.push(LeaderboardEntry {
-                                user: SteamId(entry.m_steamIDUser.m_steamid.m_unAll64Bits),
-                                global_rank: entry.m_nGlobalRank,
-                                score: entry.m_nScore,
-                                details,
-                            })
-                        }
-                        Ok(entries)
+                        Ok(collect_leaderboard_entries(
+                            user_stats as *mut _,
+                            v,
+                            max_details_len,
+                        ))
                     })
                 },
             );
@@ -458,6 +439,314 @@ impl UserStats {
         }
     }
 
+    /// Downloads the leaderboard entries of the given users only.
+    ///
+    /// At most `max_details_len` detail values are read for each entry.
+    pub fn download_leaderboard_entries_for_users<F>(
+        &self,
+        leaderboard: &Leaderboard,
+        users: &[SteamId],
+        max_details_len: usize,
+        cb: F,
+    ) where
+        F: FnOnce(Result<Vec<LeaderboardEntry>, SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let mut ids: Vec<sys::CSteamID> = users
+                .iter()
+                .map(|user| std::mem::transmute::<u64, sys::CSteamID>(user.0))
+                .collect();
+            let api_call = sys::SteamAPI_ISteamUserStats_DownloadLeaderboardEntriesForUsers(
+                self.user_stats,
+                leaderboard.0,
+                ids.as_mut_ptr() as *mut _,
+                ids.len() as _,
+            );
+            let user_stats = self.user_stats as isize;
+            register_call_result::<sys::LeaderboardScoresDownloaded_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        Ok(collect_leaderboard_entries(
+                            user_stats as *mut _,
+                            v,
+                            max_details_len,
+                        ))
+                    })
+                },
+            );
+        }
+    }
+
+    /// Attaches a piece of cloud content (a `UGCHandle_t`, for example from
+    /// [`RemoteStorage`]) to the local user's entry on a leaderboard.
+    pub fn attach_leaderboard_ugc<F>(&self, leaderboard: &Leaderboard, ugc_handle: u64, cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUserStats_AttachLeaderboardUGC(
+                self.user_stats,
+                leaderboard.0,
+                ugc_handle,
+            );
+            register_call_result::<sys::LeaderboardUGCSet_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else if v.m_eResult == sys::EResult::k_EResultOK {
+                        Ok(())
+                    } else {
+                        Err(v.m_eResult.into())
+                    })
+                },
+            );
+        }
+    }
+
+    /// Asks Steam how many players are playing the current game right now.
+    ///
+    /// The callback receives `Err` when the request fails.
+    pub fn get_number_of_current_players<F>(&self, cb: F)
+    where
+        F: FnOnce(Result<i32, SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUserStats_GetNumberOfCurrentPlayers(self.user_stats);
+            register_call_result::<sys::NumberOfCurrentPlayers_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error || v.m_bSuccess == 0 {
+                        Err(SteamError::IOFailure)
+                    } else {
+                        Ok(v.m_cPlayers)
+                    })
+                },
+            );
+        }
+    }
+
+    /// Updates an average-rate stat. `count_this_session` is the amount accumulated and
+    /// `session_length` the length of the session in seconds.
+    pub fn update_avg_rate_stat(
+        &self,
+        name: &str,
+        count_this_session: f32,
+        session_length: f64,
+    ) -> Result<(), ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        let success = unsafe {
+            sys::SteamAPI_ISteamUserStats_UpdateAvgRateStat(
+                self.user_stats,
+                name.as_ptr(),
+                count_this_session,
+                session_length,
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// Reads an integer stat of another user. Needs [`request_user_stats()`](#method.request_user_stats)
+    /// for that user to have completed.
+    pub fn get_user_stat_i32(&self, user: SteamId, name: &str) -> Result<i32, ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        unsafe {
+            let mut value = 0;
+            if sys::SteamAPI_ISteamUserStats_GetUserStatInt32(
+                self.user_stats,
+                user.0,
+                name.as_ptr(),
+                &mut value,
+            ) {
+                Ok(value)
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Reads a float stat of another user. Same requirements as
+    /// [`get_user_stat_i32()`](#method.get_user_stat_i32).
+    pub fn get_user_stat_f32(&self, user: SteamId, name: &str) -> Result<f32, ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        unsafe {
+            let mut value = 0.0;
+            if sys::SteamAPI_ISteamUserStats_GetUserStatFloat(
+                self.user_stats,
+                user.0,
+                name.as_ptr(),
+                &mut value,
+            ) {
+                Ok(value)
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Reads the most achieved achievement of the game. Returns `None` when there is none, or
+    /// when the global percentages were not requested yet.
+    pub fn get_most_achieved_achievement_info(&self) -> Option<MostAchievedAchievement> {
+        self.read_most_achieved(None)
+    }
+
+    /// Reads the next entry of the "most achieved" ranking after `previous`, the `iterator` value of
+    /// the entry returned before. Returns `None` after the last entry.
+    pub fn get_next_most_achieved_achievement_info(
+        &self,
+        previous: i32,
+    ) -> Option<MostAchievedAchievement> {
+        self.read_most_achieved(Some(previous))
+    }
+
+    fn read_most_achieved(&self, previous: Option<i32>) -> Option<MostAchievedAchievement> {
+        unsafe {
+            let mut buffer = [0 as std::os::raw::c_char; 256];
+            let mut percent = 0.0;
+            let mut achieved = false;
+            let iterator = match previous {
+                None => sys::SteamAPI_ISteamUserStats_GetMostAchievedAchievementInfo(
+                    self.user_stats,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    &mut percent,
+                    &mut achieved,
+                ),
+                Some(previous) => sys::SteamAPI_ISteamUserStats_GetNextMostAchievedAchievementInfo(
+                    self.user_stats,
+                    previous,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    &mut percent,
+                    &mut achieved,
+                ),
+            };
+            if iterator < 0 {
+                return None;
+            }
+            Some(MostAchievedAchievement {
+                iterator,
+                name: CStr::from_ptr(buffer.as_ptr())
+                    .to_string_lossy()
+                    .into_owned(),
+                percent,
+                achieved,
+            })
+        }
+    }
+
+    /// Asks Steam for the global stats of the game and their history for the last
+    /// `history_days` days (at most 60).
+    pub fn request_global_stats<F>(&self, history_days: i32, cb: F)
+    where
+        F: FnOnce(Result<GameId, SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call =
+                sys::SteamAPI_ISteamUserStats_RequestGlobalStats(self.user_stats, history_days);
+            register_call_result::<sys::GlobalStatsReceived_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else if v.m_eResult == sys::EResult::k_EResultOK {
+                        Ok(GameId(v.m_nGameID))
+                    } else {
+                        Err(v.m_eResult.into())
+                    })
+                },
+            );
+        }
+    }
+
+    /// Reads a global integer stat. Needs [`request_global_stats()`](#method.request_global_stats)
+    /// to have completed.
+    pub fn get_global_stat_i64(&self, name: &str) -> Result<i64, ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        unsafe {
+            let mut value = 0;
+            if sys::SteamAPI_ISteamUserStats_GetGlobalStatInt64(
+                self.user_stats,
+                name.as_ptr(),
+                &mut value,
+            ) {
+                Ok(value)
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Reads a global float stat. Same requirements as
+    /// [`get_global_stat_i64()`](#method.get_global_stat_i64).
+    pub fn get_global_stat_f64(&self, name: &str) -> Result<f64, ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        unsafe {
+            let mut value = 0.0;
+            if sys::SteamAPI_ISteamUserStats_GetGlobalStatDouble(
+                self.user_stats,
+                name.as_ptr(),
+                &mut value,
+            ) {
+                Ok(value)
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Reads the daily history of a global integer stat, newest day first. `days` is the number of
+    /// days to read (at most the days passed to
+    /// [`request_global_stats()`](#method.request_global_stats)).
+    pub fn get_global_stat_history_i64(&self, name: &str, days: u32) -> Result<Vec<i64>, ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        let mut data = vec![0i64; days as usize];
+        let written = unsafe {
+            sys::SteamAPI_ISteamUserStats_GetGlobalStatHistoryInt64(
+                self.user_stats,
+                name.as_ptr(),
+                data.as_mut_ptr(),
+                (data.len() * std::mem::size_of::<i64>()) as u32,
+            )
+        };
+        if written < 0 {
+            return Err(());
+        }
+        data.truncate(written as usize);
+        Ok(data)
+    }
+
+    /// Reads the daily history of a global float stat, newest day first. Same arguments as
+    /// [`get_global_stat_history_i64()`](#method.get_global_stat_history_i64).
+    pub fn get_global_stat_history_f64(&self, name: &str, days: u32) -> Result<Vec<f64>, ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        let mut data = vec![0f64; days as usize];
+        let written = unsafe {
+            sys::SteamAPI_ISteamUserStats_GetGlobalStatHistoryDouble(
+                self.user_stats,
+                name.as_ptr(),
+                data.as_mut_ptr(),
+                (data.len() * std::mem::size_of::<f64>()) as u32,
+            )
+        };
+        if written < 0 {
+            return Err(());
+        }
+        data.truncate(written as usize);
+        Ok(data)
+    }
+
     /// Returns an array of all achievement names for the current AppId.
     ///
     /// Returns `None` when the number of achievements is not available (no achievements defined,
@@ -480,6 +769,51 @@ impl UserStats {
         }
         Some(names)
     }
+}
+
+/// Reads the entries of a finished leaderboard download.
+unsafe fn collect_leaderboard_entries(
+    user_stats: *mut sys::ISteamUserStats,
+    v: &sys::LeaderboardScoresDownloaded_t,
+    max_details_len: usize,
+) -> Vec<LeaderboardEntry> {
+    let len = v.m_cEntryCount;
+    let mut entries = Vec::with_capacity(len as usize);
+    for idx in 0..len {
+        let mut entry: sys::LeaderboardEntry_t = std::mem::zeroed();
+        let mut details = Vec::with_capacity(max_details_len);
+
+        sys::SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(
+            user_stats,
+            v.m_hSteamLeaderboardEntries,
+            idx,
+            &mut entry,
+            details.as_mut_ptr(),
+            max_details_len as _,
+        );
+        details.set_len(entry.m_cDetails as usize);
+
+        entries.push(LeaderboardEntry {
+            user: SteamId(entry.m_steamIDUser.m_steamid.m_unAll64Bits),
+            global_rank: entry.m_nGlobalRank,
+            score: entry.m_nScore,
+            details,
+        })
+    }
+    entries
+}
+
+/// The achievement that Steam lists at one position of the global "most achieved" ranking.
+#[derive(Clone, Debug)]
+pub struct MostAchievedAchievement {
+    /// Pass this to [`UserStats::get_next_most_achieved_achievement_info`] to read the next one.
+    pub iterator: i32,
+    /// The achievement API name.
+    pub name: String,
+    /// Global unlock percentage, 0 to 100.
+    pub percent: f32,
+    /// Whether the local user has unlocked it.
+    pub achieved: bool,
 }
 
 #[derive(Clone, Debug)]
