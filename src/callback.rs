@@ -49,6 +49,17 @@ pub enum CallbackResult {
     GSClientKick(GSClientKick),
     GSClientGroupStatus(GSClientGroupStatus),
     NewUrlLaunchParameters(NewUrlLaunchParameters),
+    AppProofOfPurchaseKeyResponse(AppProofOfPurchaseKeyResponse),
+    HttpRequestHeadersReceived(HttpRequestHeadersReceived),
+    HttpRequestDataReceived(HttpRequestDataReceived),
+    GameConnectedFriendChatMsg(GameConnectedFriendChatMsg),
+    GameConnectedClanChatMsg(GameConnectedClanChatMsg),
+    GameConnectedChatJoin(GameConnectedChatJoin),
+    GameConnectedChatLeave(GameConnectedChatLeave),
+    FriendRichPresenceUpdate(FriendRichPresenceUpdate),
+    UnreadChatMessagesChanged(UnreadChatMessagesChanged),
+    OverlayBrowserProtocolNavigation(OverlayBrowserProtocolNavigation),
+    EquippedProfileItemsChanged(EquippedProfileItemsChanged),
 }
 
 impl CallbackResult {
@@ -120,6 +131,39 @@ impl CallbackResult {
             }
             NewUrlLaunchParameters::ID => {
                 Self::NewUrlLaunchParameters(NewUrlLaunchParameters::from_raw(data))
+            }
+            AppProofOfPurchaseKeyResponse::ID => {
+                Self::AppProofOfPurchaseKeyResponse(AppProofOfPurchaseKeyResponse::from_raw(data))
+            }
+            HttpRequestHeadersReceived::ID => {
+                Self::HttpRequestHeadersReceived(HttpRequestHeadersReceived::from_raw(data))
+            }
+            HttpRequestDataReceived::ID => {
+                Self::HttpRequestDataReceived(HttpRequestDataReceived::from_raw(data))
+            }
+            GameConnectedFriendChatMsg::ID => {
+                Self::GameConnectedFriendChatMsg(GameConnectedFriendChatMsg::from_raw(data))
+            }
+            GameConnectedClanChatMsg::ID => {
+                Self::GameConnectedClanChatMsg(GameConnectedClanChatMsg::from_raw(data))
+            }
+            GameConnectedChatJoin::ID => {
+                Self::GameConnectedChatJoin(GameConnectedChatJoin::from_raw(data))
+            }
+            GameConnectedChatLeave::ID => {
+                Self::GameConnectedChatLeave(GameConnectedChatLeave::from_raw(data))
+            }
+            FriendRichPresenceUpdate::ID => {
+                Self::FriendRichPresenceUpdate(FriendRichPresenceUpdate::from_raw(data))
+            }
+            UnreadChatMessagesChanged::ID => {
+                Self::UnreadChatMessagesChanged(UnreadChatMessagesChanged::from_raw(data))
+            }
+            OverlayBrowserProtocolNavigation::ID => Self::OverlayBrowserProtocolNavigation(
+                OverlayBrowserProtocolNavigation::from_raw(data),
+            ),
+            EquippedProfileItemsChanged::ID => {
+                Self::EquippedProfileItemsChanged(EquippedProfileItemsChanged::from_raw(data))
             }
             _ => return None,
         })
