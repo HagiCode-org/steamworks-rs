@@ -460,17 +460,18 @@ impl UserStats {
 
     /// Returns an array of all achievement names for the current AppId.
     ///
-    /// Returns an empty string for an achievement name if `iAchievement` is not a valid index,
-    /// and the current AppId must have achievements.
+    /// Returns `None` when the number of achievements is not available (no achievements defined,
+    /// AppId `480`, or stats not received) or when Steam returns no name for an index.
     pub fn get_achievement_names(&self) -> Option<Vec<String>> {
-        let num = self
-            .get_num_achievements()
-            .expect("Failed to get number of achievements");
+        let num = self.get_num_achievements().ok()?;
         let mut names = Vec::new();
 
         for i in 0..num {
             unsafe {
                 let name = sys::SteamAPI_ISteamUserStats_GetAchievementName(self.user_stats, i);
+                if name.is_null() {
+                    return None;
+                }
 
                 let c_str = CStr::from_ptr(name).to_string_lossy().into_owned();
 

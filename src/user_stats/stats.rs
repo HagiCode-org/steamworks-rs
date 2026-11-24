@@ -164,13 +164,16 @@ impl AchievementHelper<'_> {
     /// ```
     pub fn get_achievement_display_attribute(&self, key: &str) -> Result<&str, ()> {
         unsafe {
-            let key_c_str = CString::new(key).expect("Failed to create c_str from key parameter");
+            let key_c_str = CString::new(key).map_err(|_| ())?;
 
             let str = sys::SteamAPI_ISteamUserStats_GetAchievementDisplayAttribute(
                 self.parent.user_stats,
                 self.name.as_ptr(),
                 key_c_str.as_ptr(),
             );
+            if str.is_null() {
+                return Err(());
+            }
 
             let c_str = CStr::from_ptr(str);
 
@@ -179,6 +182,142 @@ impl AchievementHelper<'_> {
                 Err(_) => Err(()),
             }
         }
+    }
+
+    /// Gets the unlock status of the achievement together with the time it was unlocked.
+    ///
+    /// Returns `(achieved, unlock_time)`. `unlock_time` is in seconds since January 1, 1970 (UTC).
+    /// It is only meaningful when `achieved` is `true`. Steam started tracking unlock times in
+    /// December 2009, so an achievement unlocked earlier may report a time of `0`.
+    ///
+    /// Fails if this achievement's 'API Name' is unknown, or unsuccessful
+    /// [`UserStatsReceived`](../struct.UserStatsReceived.html).
+    pub fn get_achievement_and_unlock_time(&self) -> Result<(bool, u32), ()> {
+        unsafe {
+            let mut achieved = false;
+            let mut unlock_time = 0;
+            let success = sys::SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime(
+                self.parent.user_stats,
+                self.name.as_ptr(),
+                &mut achieved,
+                &mut unlock_time,
+            );
+            if success {
+                Ok((achieved, unlock_time))
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Gets the unlock status and unlock time of the achievement for another user.
+    ///
+    /// Returns `(achieved, unlock_time)` like
+    /// [`get_achievement_and_unlock_time()`](#method.get_achievement_and_unlock_time).
+    /// Needs [`request_user_stats()`](../struct.UserStats.html#method.request_user_stats) for that
+    /// user to have completed through the [`UserStatsReceived`](../struct.UserStatsReceived.html)
+    /// callback.
+    pub fn get_user_achievement_and_unlock_time(&self, user: SteamId) -> Result<(bool, u32), ()> {
+        unsafe {
+            let mut achieved = false;
+            let mut unlock_time = 0;
+            let success = sys::SteamAPI_ISteamUserStats_GetUserAchievementAndUnlockTime(
+                self.parent.user_stats,
+                user.0,
+                self.name.as_ptr(),
+                &mut achieved,
+                &mut unlock_time,
+            );
+            if success {
+                Ok((achieved, unlock_time))
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Shows the Steam overlay progress notification for an achievement.
+    ///
+    /// Calling this with `cur_progress == max_progress` does NOT unlock the achievement; use
+    /// [`set()`](#method.set) for that. Triggers a
+    /// [`UserAchievementStored`](../struct.UserAchievementStored.html) callback.
+    pub fn indicate_achievement_progress(
+        &self,
+        cur_progress: u32,
+        max_progress: u32,
+    ) -> Result<(), ()> {
+        let success = unsafe {
+            sys::SteamAPI_ISteamUserStats_IndicateAchievementProgress(
+                self.parent.user_stats,
+                self.name.as_ptr(),
+                cur_progress,
+                max_progress,
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// Gets the bounds of an integer progress stat that is linked to the achievement.
+    ///
+    /// Returns `(min, max)`. Fails when the achievement has no linked integer progress stat, when
+    /// its 'API Name' is unknown, or when the stats have not been received.
+    pub fn get_achievement_progress_limits_i32(&self) -> Result<(i32, i32), ()> {
+        unsafe {
+            let mut min = 0;
+            let mut max = 0;
+            let success = sys::SteamAPI_ISteamUserStats_GetAchievementProgressLimitsInt32(
+                self.parent.user_stats,
+                self.name.as_ptr(),
+                &mut min,
+                &mut max,
+            );
+            if success {
+                Ok((min, max))
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Gets the bounds of a float progress stat that is linked to the achievement.
+    ///
+    /// Returns `(min, max)`. Fails when the achievement has no linked float progress stat, when
+    /// its 'API Name' is unknown, or when the stats have not been received.
+    pub fn get_achievement_progress_limits_f32(&self) -> Result<(f32, f32), ()> {
+        unsafe {
+            let mut min = 0.0;
+            let mut max = 0.0;
+            let success = sys::SteamAPI_ISteamUserStats_GetAchievementProgressLimitsFloat(
+                self.parent.user_stats,
+                self.name.as_ptr(),
+                &mut min,
+                &mut max,
+            );
+            if success {
+                Ok((min, max))
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    /// Gets the icon of the achievement as raw RGBA pixels, at whatever size Steam has it.
+    ///
+    /// Returns `None` while Steam has not fetched the icon yet (a
+    /// [`UserAchievementIconFetched`](../struct.UserAchievementIconFetched.html) callback is
+    /// processed when it is ready) and when the achievement has no icon. Unlike
+    /// [`get_achievement_icon()`](#method.get_achievement_icon) it does not insist on 64x64.
+    pub fn get_achievement_icon_rgba(&self) -> Option<AchievementIcon> {
+        let (rgba, width, height) = self.internal_get_achievement_icon(false)?;
+        Some(AchievementIcon {
+            width,
+            height,
+            rgba,
+        })
     }
 
     /// Gets the icon for an achievement.
@@ -238,4 +377,16 @@ impl AchievementHelper<'_> {
         let img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_vec(width, height, vec)?;
         return Some(img);
     }
+}
+
+/// Raw RGBA pixels of an achievement icon, see
+/// [`AchievementHelper::get_achievement_icon_rgba()`](struct.AchievementHelper.html#method.get_achievement_icon_rgba).
+#[derive(Clone, Debug)]
+pub struct AchievementIcon {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// `width * height * 4` bytes, row by row, one byte each for R, G, B and A.
+    pub rgba: Vec<u8>,
 }
